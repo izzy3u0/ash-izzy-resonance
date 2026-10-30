@@ -32,7 +32,7 @@ export function buildBridgeEvent(
         "replyRoute=" + routing.replyRoute,
         "replyPolicy=" + (routing.replyPolicy ?? "optional"),
         routing.replyPolicy === "required"
-          ? "ROUTING CONTRACT (mandatory): before completing this turn, call cove_bridge_reply exactly once and put the complete user-facing reply in messages[]. A reply shown only in ChatGPT is incomplete because the user is waiting in NetEase ChatRoom. For normal conversation, default to 2-5 short natural bubbles; use one bubble only for a genuinely brief reply. Do not pack a multi-sentence reply into one bubble, and do not invent filler merely to increase the count. eventId may be omitted because the Bridge binds to the active required event. Do not use netease_together_send_message directly."
+          ? "ROUTING CONTRACT (mandatory): before completing this turn, call cove_bridge_reply exactly once and put the complete user-facing reply in messages[]. A reply shown only in ChatGPT is incomplete because the user is waiting in NetEase ChatRoom. For normal conversation, default to 2-5 short natural bubbles; use one bubble only for a genuinely brief reply. Do not pack a multi-sentence reply into one bubble, and do not invent filler merely to increase the count. Pass the exact eventId returned by the listener; never omit it or reuse an event from another room. Do not use netease_together_send_message directly."
           : "ROUTING CONTRACT (optional): if you choose to send a user-facing reaction for this event, deliver it through cove_bridge_reply using this exact eventId. If no reaction is useful, do not call the reply tool.",
       ]
     : [];

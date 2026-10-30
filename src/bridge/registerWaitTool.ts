@@ -1,3 +1,4 @@
+import { MCP_SCOPE } from "../auth.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { InMemoryEventQueue } from "../queue.js";
@@ -56,6 +57,7 @@ export function registerBridgeWaitTool(
         replyPolicy: z.enum(["required", "optional"]).optional(),
         createdAt: z.string().optional(),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -159,6 +161,7 @@ export function registerBridgeWaitTool(
         "This is the model-side long-wait acknowledgement path; the existing app-only cove_bridge_delivered tool remains reserved for the Widget Listener.",
       inputSchema: { eventId: z.string().trim().min(1) },
       outputSchema: { acknowledged: z.boolean() },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,

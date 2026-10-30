@@ -18,7 +18,8 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "NeteaseCloudMusicApi": "4.32.0",
     "node-nim": "10.10.13",
-    "zod": "4.6.5"
+    "zod": "4.6.5",
+    "jose": "6.2.12"
   },
   "devDependencies": {
     "@types/node": "22.20.2",

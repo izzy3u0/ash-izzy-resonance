@@ -1,31 +1,23 @@
+import { serverFixture } from "./fixtures.js";
+import type { InMemoryEventQueue } from "../src/queue.js";
+import { buildBridgeEvent } from "../src/bridge/events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
+let authorization = "";
+let fixtureQueue: InMemoryEventQueue;
 async function withServer(run: (base: string) => Promise<void>): Promise<void> {
-  const previous = process.env.NODE_ENV;
-  process.env.NODE_ENV = "test";
-  const { createHttpServer } = await import("../src/server.js");
-  if (previous === undefined) delete process.env.NODE_ENV;
-  else process.env.NODE_ENV = previous;
-
-  const server = createHttpServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
-  });
-  try {
-    const address = server.address();
-    assert.ok(address && typeof address !== "string");
-    await run("http://127.0.0.1:" + address.port);
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
+  const fixture = await serverFixture();
+  authorization = fixture.authorization;
+  fixtureQueue = fixture.queue;
+  try { await run(fixture.base); } finally { await fixture.close(); }
 }
 
 async function rpc(base: string, path: string, id: number, method: string) {
   const response = await fetch(base + path, {
     method: "POST",
     headers: {
+      authorization,
       "content-type": "application/json",
       "accept": "application/json, text/event-stream",
     },

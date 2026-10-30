@@ -3,11 +3,11 @@ import { registerBridgeApp } from "./bridge/registerApp.js";
 import { registerBridgeTools } from "./bridge/registerTools.js";
 import { registerBridgeWaitTool } from "./bridge/registerWaitTool.js";
 import { acceptsProfileSource, buildProfileInstructions, type McpProfile } from "./profiles.js";
-import { registerNeteaseAccountTools } from "./netease/accountTools.js";
-import { NeteaseClient } from "./netease/client.js";
+import { registerNeteaseSearchTool } from "./netease/accountTools.js";
 import { registerNeteaseTogetherTools } from "./netease/registerTogetherTools.js";
 import type { PlaybackStateStore } from "./netease/playbackState.js";
 import type { TogetherWorker } from "./netease/togetherWorker.js";
+import type { BridgeEvent } from "./types.js";
 import type { InMemoryEventQueue } from "./queue.js";
 
 export { RESOURCE_URI } from "./bridge/registerApp.js";
@@ -23,12 +23,13 @@ export function createMcpServer(
     { name: profile === "music" ? "cove-resonance-music" : "cove-resonance", version: "0.2.0" },
     { instructions: buildProfileInstructions(profile) },
   );
-  const eventFilter = (event: { source: string }) => acceptsProfileSource(profile, event.source);
+  const eventFilter = (event: BridgeEvent) =>
+    acceptsProfileSource(profile, event.source)
+    && (!event.replyTarget || togetherWorker.isCurrentReplyTarget(event.replyTarget));
 
-  const neteaseAccountClient = new NeteaseClient(process.env.NETEASE_COOKIE?.trim() ?? "");
-  registerNeteaseAccountTools(server, neteaseAccountClient);
+  registerNeteaseSearchTool(server, togetherWorker);
   registerBridgeApp(server);
-  registerNeteaseTogetherTools(server, playbackState, togetherWorker, queue, eventFilter);
+  registerNeteaseTogetherTools(server, playbackState, togetherWorker);
   registerBridgeTools(server, queue, eventFilter, togetherWorker);
   registerBridgeWaitTool(server, queue, eventFilter);
 

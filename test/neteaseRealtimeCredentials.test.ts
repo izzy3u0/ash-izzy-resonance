@@ -83,7 +83,8 @@ test("realtime credential request keeps NetEase business errors visible", async 
       (error: unknown) => (
         error instanceof Error
         && error.name === "NeteaseApiError"
-        && error.message === "系统错误"
+        && "code" in error && error.code === 301
+        && error.message === "middle_im_token_get failed (301)"
       ),
     );
   } finally {

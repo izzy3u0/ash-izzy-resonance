@@ -2,6 +2,12 @@ export type ReplyRoute = "netease.chatroom";
 export type ReplyPolicy = "required" | "optional";
 export type BridgeStream = "conversation" | "state";
 
+export type BoundReplyTarget = {
+  roomId: string;
+  chatRoomId: string;
+  bindingId: string;
+};
+
 export type BridgeEvent = {
   id: string;
   correlationId: string;
@@ -10,6 +16,7 @@ export type BridgeEvent = {
   stream: BridgeStream;
   stateKey?: string;
   replyRoute?: ReplyRoute;
+  replyTarget?: BoundReplyTarget;
   replyPolicy?: ReplyPolicy;
   createdAt: string;
   visibleText: string;

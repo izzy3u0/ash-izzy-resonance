@@ -1,3 +1,4 @@
+import { MCP_SCOPE } from "../auth.js";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -47,6 +48,7 @@ export function registerBridgeApp(server: McpServer): void {
         openWorldHint: false,
       },
       _meta: {
+        securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }],
         ui: { resourceUri: RESOURCE_URI },
         "openai/outputTemplate": RESOURCE_URI,
       },
@@ -75,7 +77,7 @@ export function registerBridgeApp(server: McpServer): void {
         openWorldHint: false,
         idempotentHint: false,
       },
-      _meta: { ui: { visibility: ["app"] } },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }], ui: { visibility: ["app"] } },
     },
     async () => {
       const session = listenerWakeHub.createSession();

@@ -2,6 +2,10 @@
 
 This file is intentionally machine-oriented.
 
+## Personal fork phase-one overrides
+
+Read `docs/PHASE1.zh-CN.md` for the current security/deployment contract. Both MCP paths require validated owner/client OAuth JWTs; there is no anonymous or test-environment auth bypass. Do not restore automatic adoption of pre-existing Together rooms. Invitations must have the configured owner as the actual sender and inviter. Routed replies require the exact eventId and immutable room binding; never correct an old id onto a new event. Proactive sends require the current bindingId. Account playlist/like/history/recommendation tools are intentionally not registered in phase one. Tests inject offline identity/provider fixtures; never read real credentials or use production accounts for tests.
+
 If you are an AI coding agent, read this before changing the project.
 
 ## Project goal

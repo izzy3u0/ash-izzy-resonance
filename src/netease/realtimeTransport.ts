@@ -1,3 +1,4 @@
+import { safeError } from "../security.js";
 import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -524,10 +525,8 @@ export class NeteaseRealtimeTransport {
       stdio: ["ignore", "ignore", "pipe", "ipc"],
     });
 
-    let stderr = "";
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderr = (stderr + String(chunk)).slice(-2000);
-    });
+    // Native bootstrap diagnostics may include credentials. Drain without logging.
+    child.stderr?.resume();
 
     try {
       const result = await new Promise<[number, string]>((resolve, reject) => {
@@ -553,8 +552,7 @@ export class NeteaseRealtimeTransport {
         child.once("exit", (code, signal) => {
           finish(() => reject(new Error(
             "NIM ticket bootstrap exited before reply"
-            + ` code=${String(code)} signal=${String(signal)}`
-            + (stderr ? ` stderr=${stderr.slice(-400)}` : ""),
+            + ` code=${String(code)} signal=${String(signal)}`,
           )));
         });
 
@@ -562,7 +560,7 @@ export class NeteaseRealtimeTransport {
           const message = asRecord(raw);
           if (message.ok !== true) {
             finish(() => reject(new Error(
-              readString(message.error) || "NIM ticket bootstrap failed",
+              "NIM ticket bootstrap failed",
             )));
             return;
           }
@@ -654,7 +652,7 @@ export class NeteaseRealtimeTransport {
 
     chatroom.on("receiveMsg", (...args: unknown[]) => {
       const room = readNumber(args[0]);
-      if (this.roomNumber !== null && room !== this.roomNumber) return;
+      if (this.roomNumber === null || room !== this.roomNumber) return;
       const receivedAtMs = Date.now();
       const event = decodeRealtimePlaybackEvent(args[1], receivedAtMs);
       if (event) {
@@ -671,7 +669,7 @@ export class NeteaseRealtimeTransport {
         try {
           this.onPlaybackEvent?.(event);
         } catch (error) {
-          const detail = error instanceof Error ? error.message : "unknown error";
+          const detail = safeError(error);
           console.error(`NetEase realtime playback sink failed: ${detail}`);
         }
         return;
@@ -682,16 +680,13 @@ export class NeteaseRealtimeTransport {
       this.status.lastChatMessage = message;
       const sender = message.senderId ? `***${message.senderId.slice(-4)}` : "unknown";
       const messageId = message.messageId ? `***${message.messageId.slice(-6)}` : "unknown";
-      const textPreview = message.category === "text" && message.text
-        ? message.text.replace(/[\r\n\t]+/g, " ").slice(0, 80)
-        : null;
       console.log(
-        `NetEase ChatRoom message received: category=${message.category} msgType=${message.msgType ?? "unknown"} sender=${sender} textLength=${message.text?.length ?? 0} textPreview=${textPreview === null ? "n/a" : JSON.stringify(textPreview)} messageId=${messageId}`,
+        `NetEase ChatRoom message received: category=${message.category} msgType=${message.msgType ?? "unknown"} sender=${sender} textLength=${message.text?.length ?? 0} messageId=${messageId}`,
       );
       try {
         this.onChatMessage?.(message);
       } catch (error) {
-        const detail = error instanceof Error ? error.message : "unknown error";
+        const detail = safeError(error);
         console.error(`NetEase ChatRoom message sink failed: ${detail}`);
       }
     });
@@ -737,12 +732,13 @@ export class NeteaseRealtimeTransport {
       roomId: options.roomId,
       chatRoomId: options.chatRoomId,
       credentialsReady: true,
-      lastPlaybackEvent: this.status.lastPlaybackEvent,
-      lastChatMessage: this.status.lastChatMessage,
+      lastPlaybackEvent: null,
+      lastChatMessage: null,
       lastError: null,
     };
 
     await this.ensureRuntime();
+    if (generation !== this.generation) return;
     const chatroom = this.chatroom;
     if (!chatroom) throw new Error("NIM realtime runtime is unavailable");
 
@@ -757,6 +753,7 @@ export class NeteaseRealtimeTransport {
 
     const [requestCode, requestLoginData] =
       await this.requestEnterTicket(options.credentials, roomNumber);
+    if (generation !== this.generation) return;
     if (requestCode !== 200 || !requestLoginData) {
       throw new Error(`NIM chatroom enter ticket failed code=${requestCode}`);
     }
@@ -818,6 +815,7 @@ export class NeteaseRealtimeTransport {
         );
       }
 
+      if (generation !== this.generation) return;
       this.activeMemberProfile = options.memberProfile ?? null;
       this.status.connected = true;
       this.status.lastError = null;
@@ -855,7 +853,7 @@ export class NeteaseRealtimeTransport {
       } catch (error) {
         this.pendingSends.delete(messageId);
         clearTimeout(timeout);
-        reject(error instanceof Error ? error : new Error("NIM ChatRoom send threw an unknown error"));
+        reject(new Error("NIM ChatRoom send failed"));
         return;
       }
       if (!accepted) {
@@ -883,6 +881,8 @@ export class NeteaseRealtimeTransport {
     this.status.roomId = null;
     this.status.chatRoomId = null;
     this.status.credentialsReady = false;
+    this.status.lastChatMessage = null;
+    this.status.lastPlaybackEvent = null;
     this.activeMemberProfile = null;
 
     if (roomNumber !== null && this.chatroom) {
@@ -894,8 +894,8 @@ export class NeteaseRealtimeTransport {
     }
   }
 
-  recordConnectionError(error: unknown): void {
+  recordConnectionError(_error: unknown): void {
     this.status.connected = false;
-    this.status.lastError = error instanceof Error ? error.message : "NIM realtime connect failed";
+    this.status.lastError = "NIM realtime connect failed";
   }
 }

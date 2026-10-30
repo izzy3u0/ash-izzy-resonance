@@ -1,3 +1,6 @@
+import { serverFixture } from "./fixtures.js";
+import type { InMemoryEventQueue } from "../src/queue.js";
+import { buildBridgeEvent } from "../src/bridge/events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -7,26 +10,13 @@ type RpcResult = {
   };
 };
 
+let authorization = "";
+let fixtureQueue: InMemoryEventQueue;
 async function withServer(run: (base: string) => Promise<void>): Promise<void> {
-  const previous = process.env.NODE_ENV;
-  process.env.NODE_ENV = "test";
-  const { createHttpServer } = await import("../src/server.js");
-  if (previous === undefined) delete process.env.NODE_ENV;
-  else process.env.NODE_ENV = previous;
-
-  const server = createHttpServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
-  });
-
-  try {
-    const address = server.address();
-    assert.ok(address && typeof address !== "string");
-    await run("http://127.0.0.1:" + address.port);
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
+  const fixture = await serverFixture();
+  authorization = fixture.authorization;
+  fixtureQueue = fixture.queue;
+  try { await run(fixture.base); } finally { await fixture.close(); }
 }
 
 async function callTool(
@@ -38,6 +28,7 @@ async function callTool(
   const response = await fetch(base + "/mcp/music", {
     method: "POST",
     headers: {
+      authorization,
       "content-type": "application/json",
       "accept": "application/json, text/event-stream",
     },
@@ -52,13 +43,8 @@ async function callTool(
   return await response.json() as RpcResult;
 }
 
-async function enqueue(base: string, eventId: string, source: string, text: string): Promise<void> {
-  const response = await fetch(base + "/events", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ eventId, source, text }),
-  });
-  assert.equal(response.status, 201);
+async function enqueue(_base: string, eventId: string, source: string, text: string): Promise<void> {
+  assert.equal(fixtureQueue.enqueue(buildBridgeEvent(eventId, source, text)), true);
 }
 
 test("long-wait returns an already pending Music event immediately", async () => {

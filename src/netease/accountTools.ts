@@ -1,3 +1,4 @@
+import { MCP_SCOPE } from "../auth.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { NeteaseClient } from "./client.js";
@@ -19,7 +20,7 @@ const playlistSchema = z.object({
   privacy: z.number().nullable(),
 });
 
-export function registerNeteaseAccountTools(server: McpServer, client: NeteaseClient): void {
+export function registerNeteaseSearchTool(server: McpServer, client: Pick<NeteaseClient, "searchSongs">): void {
   server.registerTool(
     "netease_search_songs",
     {
@@ -30,6 +31,7 @@ export function registerNeteaseAccountTools(server: McpServer, client: NeteaseCl
         limit: z.number().int().min(1).max(20).default(10),
       },
       outputSchema: { songs: z.array(songSchema) },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -45,6 +47,10 @@ export function registerNeteaseAccountTools(server: McpServer, client: NeteaseCl
     },
   );
 
+}
+
+export function registerNeteaseAccountTools(server: McpServer, client: NeteaseClient): void {
+  registerNeteaseSearchTool(server, client);
   server.registerTool(
     "netease_my_playlists",
     {
@@ -54,6 +60,7 @@ export function registerNeteaseAccountTools(server: McpServer, client: NeteaseCl
         limit: z.number().int().min(1).max(100).default(50),
       },
       outputSchema: { playlists: z.array(playlistSchema) },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -79,6 +86,7 @@ export function registerNeteaseAccountTools(server: McpServer, client: NeteaseCl
         limit: z.number().int().min(1).max(100).default(50),
       },
       outputSchema: { songs: z.array(songSchema) },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -110,6 +118,7 @@ export function registerNeteaseAccountTools(server: McpServer, client: NeteaseCl
           privacy: z.number(),
         }),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -140,6 +149,7 @@ export function registerNeteaseAccountTools(server: McpServer, client: NeteaseCl
         playlistId: z.string(),
         songIds: z.array(z.string()),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -171,6 +181,7 @@ export function registerNeteaseAccountTools(server: McpServer, client: NeteaseCl
         playlistId: z.string(),
         songIds: z.array(z.string()),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -202,6 +213,7 @@ export function registerNeteaseAccountTools(server: McpServer, client: NeteaseCl
         songId: z.string(),
         liked: z.boolean(),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -235,6 +247,7 @@ export function registerNeteaseAccountTools(server: McpServer, client: NeteaseCl
           score: z.number().nullable(),
         })),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -261,6 +274,7 @@ export function registerNeteaseAccountTools(server: McpServer, client: NeteaseCl
       outputSchema: {
         songs: z.array(songSchema.extend({ reason: z.string().nullable() })),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,

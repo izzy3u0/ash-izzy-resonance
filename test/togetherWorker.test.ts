@@ -1,3 +1,4 @@
+import { bindFixture } from "./fixtures.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TogetherWorker } from "../src/netease/togetherWorker.js";
@@ -13,11 +14,13 @@ test("deduplicates repeated realtime ChatRoom messages by message id", () => {
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     onEvent: (source, text) => {
       events.push({ source, text });
     },
   });
 
+  bindFixture(worker);
   const message: RealtimeChatRoomMessage = {
     type: "chatroom_message",
     category: "text",
@@ -56,6 +59,7 @@ test("applies realtime playback to state immediately before the next HTTP poll",
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     onEvent: (source, text) => {
       events.push({ source, text });
     },
@@ -113,6 +117,7 @@ test("ignores a stale playback serverSeq after a newer realtime event", () => {
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     onEvent: () => {},
     stateSink,
   });
@@ -157,6 +162,7 @@ test("skips HTTP playback reconcile while realtime is connected and the interval
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     playbackReconcileIntervalMs: 30_000,
     heartbeatIntervalMs: 10_000,
     onEvent: () => {},
@@ -200,6 +206,7 @@ test("skips HTTP playback reconcile while realtime is connected and the interval
     lastHeartbeatAt: number;
   };
 
+  bindFixture(worker);
   internals.roomId = "room";
   internals.chatRoomId = "123";
   internals.latestPlaying = {
@@ -245,6 +252,7 @@ test("falls back to HTTP playback reconcile immediately when realtime is disconn
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     playbackReconcileIntervalMs: 30_000,
     heartbeatIntervalMs: 10_000,
     onEvent: () => {},
@@ -290,6 +298,7 @@ test("falls back to HTTP playback reconcile immediately when realtime is disconn
     lastHeartbeatAt: number;
   };
 
+  bindFixture(worker);
   internals.roomId = "room";
   internals.chatRoomId = null;
   internals.previousSongId = "song-1";
@@ -337,6 +346,7 @@ test("heartbeat advances progress from the latest realtime anchor without anothe
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     heartbeatIntervalMs: 1_000,
     onEvent: () => {},
   });
@@ -364,6 +374,7 @@ test("heartbeat advances progress from the latest realtime anchor without anothe
     lastHeartbeatAt: number;
   };
 
+  bindFixture(worker);
   internals.roomId = "room";
   internals.latestPlaying = {
     songId: "song-1",
@@ -389,6 +400,7 @@ test("playback control waits for a matching realtime confirmation after HTTP rep
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     playbackControlTimeoutMs: 500,
     onEvent: () => {},
   });
@@ -437,6 +449,7 @@ test("playback control waits for a matching realtime confirmation after HTTP rep
     };
   };
 
+  bindFixture(worker);
   internals.roomId = "room";
   internals.latestPlaying = {
     songId: "song-1",
@@ -503,6 +516,7 @@ test("playback control ignores a realtime event from the wrong sender and times 
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     playbackControlTimeoutMs: 40,
     onEvent: () => {},
   });
@@ -541,6 +555,7 @@ test("playback control ignores a realtime event from the wrong sender and times 
     };
   };
 
+  bindFixture(worker);
   internals.roomId = "room";
   internals.latestPlaying = {
     songId: "song-1",
@@ -592,6 +607,7 @@ test("GOTO reports the target song from progress zero and waits for realtime con
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     playbackControlTimeoutMs: 500,
     onEvent: () => {},
   });
@@ -653,6 +669,7 @@ test("GOTO reports the target song from progress zero and waits for realtime con
     };
   };
 
+  bindFixture(worker);
   internals.roomId = "room";
   internals.latestPlaying = {
     songId: "old-song",
@@ -734,6 +751,7 @@ test("NEXT resolves the following ORDER_LOOP displayList song and confirms via G
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     playbackControlTimeoutMs: 500,
     onEvent: () => {},
   });
@@ -794,6 +812,7 @@ test("NEXT resolves the following ORDER_LOOP displayList song and confirms via G
     };
   };
 
+  bindFixture(worker);
   internals.roomId = "room";
   internals.latestPlaying = {
     songId: "22",
@@ -867,6 +886,7 @@ test("ENQUEUE_NEXT rewrites ORDER_LOOP displayList and confirms adjacency plus v
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     playbackControlTimeoutMs: 1_000,
     onEvent: () => {},
   });
@@ -902,6 +922,7 @@ test("ENQUEUE_NEXT rewrites ORDER_LOOP displayList and confirms adjacency plus v
     };
   };
 
+  bindFixture(worker);
   internals.roomId = "room";
   internals.latestPlaying = {
     songId: "22",
@@ -955,6 +976,7 @@ test("GOTO rejects a target outside the current Together displayList before repo
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     onEvent: () => {},
   });
 
@@ -972,6 +994,7 @@ test("GOTO rejects a target outside the current Together displayList before repo
     roomId: string | null;
   };
 
+  bindFixture(worker);
   internals.roomId = "room";
   internals.client.getTogetherPlaylist = async () => ({
     displayList: ["111", "222"],
@@ -995,6 +1018,7 @@ test("leaveTogether ends the authoritative room and clears local room state afte
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     onEvent: (source, text) => events.push({ source, text }),
   });
 
@@ -1038,6 +1062,7 @@ test("leaveTogether is a confirmed no-op when authoritative status is already ou
   const worker = new TogetherWorker({
     cookie: "",
     enabled: false,
+    inviterUid: "12345",
     onEvent: () => {},
   });
 

@@ -81,7 +81,7 @@ process.on("message", (raw: unknown) => {
     .catch((error) => {
       process.send?.({
         ok: false,
-        error: error instanceof Error ? error.message : "unknown bootstrap error",
+        error: "NIM bootstrap failed",
       });
     });
 });

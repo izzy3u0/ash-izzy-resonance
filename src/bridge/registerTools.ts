@@ -1,3 +1,4 @@
+import { MCP_SCOPE } from "../auth.js";
 import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -17,9 +18,9 @@ export function registerBridgeTools(
     "cove_bridge_reply",
     {
       title: "Reply through Cove Bridge",
-      description: "Deliver the user-facing reply for the active Cove Bridge event back through its recorded reply route. For replyPolicy=required, call this exactly once before completing the turn. eventId is optional because the Bridge binds to the active required event and corrects stale ids. For normal conversation, messages[] should contain 2-5 short natural bubbles; a single bubble is only for a genuinely brief reply. Do not pack multiple sentences into one long bubble and do not add filler just to increase the count. The Bridge will also split an obviously long single bubble as a fallback. Do not call netease_together_send_message directly for routed replies.",
+      description: "Deliver the user-facing reply for the active Cove Bridge event back through its recorded reply route. For replyPolicy=required, call this exactly once before completing the turn. eventId is required and must match the exact event returned by the listener; stale ids are rejected. For normal conversation, messages[] should contain 2-5 short natural bubbles; a single bubble is only for a genuinely brief reply. Do not pack multiple sentences into one long bubble and do not add filler just to increase the count. The Bridge will also split an obviously long single bubble as a fallback. Do not call netease_together_send_message directly for routed replies.",
       inputSchema: {
-        eventId: z.string().trim().min(1).optional(),
+        eventId: z.string().trim().min(1),
         messages: z.array(z.string().trim().min(1).max(500)).min(1).max(5),
       },
       outputSchema: {
@@ -30,6 +31,7 @@ export function registerBridgeTools(
         completed: z.boolean(),
         deduplicated: z.boolean(),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -41,19 +43,14 @@ export function registerBridgeTools(
       const outstanding = queue.getOutstandingRequiredReplyEvent(eventFilter);
       const rawRequested = eventId ? queue.getEvent(eventId) : null;
       const requested = rawRequested && eventFilter(rawRequested) ? rawRequested : null;
-      const event = outstanding ?? requested;
-      if (!event) {
-        throw new Error(eventId
-          ? `Unknown Cove Bridge event: ${eventId}`
-          : "No active Cove Bridge event is awaiting a routed reply.");
+      if (!requested?.replyTarget || !togetherWorker.isCurrentReplyTarget(requested.replyTarget)) {
+        throw new Error("Reply event is unknown or belongs to an expired room binding.");
       }
-
+      const event = requested;
+      if (outstanding && outstanding.id !== requested.id) {
+        throw new Error("Reply event does not match the active required event.");
+      }
       const resolvedEventId = event.id;
-      if (eventId && eventId !== resolvedEventId) {
-        console.warn(
-          `Cove Bridge reply eventId corrected: requested=${eventId} resolved=${resolvedEventId}`,
-        );
-      }
       if (!event.replyRoute) throw new Error(`Event has no reply route: ${resolvedEventId}`);
       if (event.replyRoute !== "netease.chatroom") {
         throw new Error(`Unsupported reply route: ${event.replyRoute}`);
@@ -87,7 +84,7 @@ export function registerBridgeTools(
       try {
         let sentCount = claim.sentCount;
         for (let index = sentCount; index < normalized.length; index += 1) {
-          await togetherWorker.sendChatRoomText(normalized[index]);
+          await togetherWorker.sendChatRoomText(normalized[index], event.replyTarget);
           sentCount = queue.markReplyMessageSent(resolvedEventId, fingerprint);
           if (index < normalized.length - 1) {
             await new Promise<void>((resolve) => setTimeout(resolve, 350));
@@ -136,7 +133,7 @@ export function registerBridgeTools(
         openWorldHint: false,
         idempotentHint: false,
       },
-      _meta: { ui: { visibility: ["app"] } },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }], ui: { visibility: ["app"] } },
     },
     async () => {
       const outstanding = queue.getOutstandingRequiredReplyEvent(eventFilter);
@@ -177,7 +174,7 @@ export function registerBridgeTools(
         openWorldHint: false,
         idempotentHint: true,
       },
-      _meta: { ui: { visibility: ["app"] } },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }], ui: { visibility: ["app"] } },
     },
     async ({ eventId }) => {
       queue.markDelivered(eventId);
@@ -198,7 +195,7 @@ export function registerBridgeTools(
         openWorldHint: false,
         idempotentHint: true,
       },
-      _meta: { ui: { visibility: ["app"] } },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }], ui: { visibility: ["app"] } },
     },
     async ({ eventId }) => {
       queue.dismiss(eventId);
@@ -220,7 +217,7 @@ export function registerBridgeTools(
         openWorldHint: false,
         idempotentHint: true,
       },
-      _meta: { ui: { visibility: ["app"] } },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }], ui: { visibility: ["app"] } },
     },
     async ({ eventId }) => {
       queue.release(eventId);

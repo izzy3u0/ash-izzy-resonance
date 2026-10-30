@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { withoutProviderLogs } from "../security.js";
 import {
   asRecord,
   readNumber,
@@ -147,12 +148,17 @@ export class NeteaseClient {
       throw new NeteaseApiError(operation, null, `Unsupported NetEase operation: ${operation}`);
     }
 
-    const response = await fn({ ...params, cookie: this.cookie });
+    let response: NcmResponse;
+    try { response = await withoutProviderLogs(() => fn({ ...params, cookie: this.cookie })); }
+    catch (error) {
+      const rejected = asRecord(error);
+      const code = readNumber(asRecord(rejected.body).code) ?? readNumber(rejected.status);
+      throw new NeteaseApiError(operation, code);
+    }
     const body = asRecord(response?.body ?? response);
     const code = readNumber(body.code);
     if (code !== 200) {
-      const message = readString(body.message) ?? readString(body.msg) ?? undefined;
-      throw new NeteaseApiError(operation, code, message);
+      throw new NeteaseApiError(operation, code);
     }
     return body;
   }
@@ -346,9 +352,8 @@ export class NeteaseClient {
           "user-agent": REALTIME_TOKEN_USER_AGENT,
         },
       });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "request failed";
-      throw new NeteaseApiError(operation, null, message);
+    } catch {
+      throw new NeteaseApiError(operation, null);
     }
 
     let body: JsonRecord;
@@ -360,8 +365,7 @@ export class NeteaseClient {
 
     const code = readNumber(body.code) ?? response.status;
     if (!response.ok || code !== 200) {
-      const message = readString(body.message) ?? readString(body.msg) ?? undefined;
-      throw new NeteaseApiError(operation, code, message);
+      throw new NeteaseApiError(operation, code);
     }
 
     const data = asRecord(body.data);

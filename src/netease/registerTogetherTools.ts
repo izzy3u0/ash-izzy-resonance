@@ -1,10 +1,6 @@
-import { createHash } from "node:crypto";
+import { MCP_SCOPE } from "../auth.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { listenerWakeHub } from "../listenerWake.js";
-import type { InMemoryEventQueue } from "../queue.js";
-import { normalizeReplyBubbles } from "../replyBubbles.js";
-import type { BridgeEvent } from "../types.js";
 import type { PlaybackStateStore } from "./playbackState.js";
 import type { TogetherWorker } from "./togetherWorker.js";
 
@@ -12,9 +8,27 @@ export function registerNeteaseTogetherTools(
   server: McpServer,
   playbackState: PlaybackStateStore,
   togetherWorker: TogetherWorker,
-  queue: InMemoryEventQueue,
-  eventFilter: (event: BridgeEvent) => boolean,
 ): void {
+  server.registerTool(
+    "netease_together_status",
+    {
+      title: "NetEase Together connection status",
+      description: "Read account validation, room binding and realtime readiness. Never returns credentials.",
+      inputSchema: {},
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async () => {
+      const status = {
+        ...togetherWorker.getStatus(),
+        bound: Boolean(togetherWorker.getReplyTarget()),
+        binding: togetherWorker.getReplyTarget(),
+        realtimeConnected: togetherWorker.getRealtimeStatus().connected,
+      };
+      return { structuredContent: status, content: [{ type: "text", text: JSON.stringify(status) }] };
+    },
+  );
+
   server.registerTool(
     "netease_together_now",
     {
@@ -43,6 +57,7 @@ export function registerNeteaseTogetherTools(
         observedAt: z.string().nullable(),
         stateUpdatedAt: z.string(),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -95,6 +110,7 @@ export function registerNeteaseTogetherTools(
         }).nullable(),
         lastError: z.string().nullable(),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -126,6 +142,7 @@ export function registerNeteaseTogetherTools(
         roomId: z.string().nullable(),
         confirmedAt: z.string(),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -162,6 +179,7 @@ export function registerNeteaseTogetherTools(
       description: "Pause the current NetEase Listen Together playback from Cove's account. Success is returned only after a matching NIM realtime confirmation is observed; an HTTP report alone is not treated as success.",
       inputSchema: {},
       outputSchema: playbackControlOutputSchema,
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -185,6 +203,7 @@ export function registerNeteaseTogetherTools(
       description: "Resume the current NetEase Listen Together playback from Cove's account. Success is returned only after a matching NIM realtime confirmation is observed; an HTTP report alone is not treated as success.",
       inputSchema: {},
       outputSchema: playbackControlOutputSchema,
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -210,6 +229,7 @@ export function registerNeteaseTogetherTools(
         songId: z.string().trim().regex(/^\d+$/),
       },
       outputSchema: playbackControlOutputSchema,
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -233,6 +253,7 @@ export function registerNeteaseTogetherTools(
       description: "Resolve the next song from the current NetEase Listen Together ORDER_LOOP displayList, then switch via a realtime-confirmed GOTO command.",
       inputSchema: {},
       outputSchema: playbackControlOutputSchema,
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -269,6 +290,7 @@ export function registerNeteaseTogetherTools(
         songId: z.string().trim().regex(/^\d+$/),
       },
       outputSchema: queueMutationOutputSchema,
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -289,8 +311,11 @@ export function registerNeteaseTogetherTools(
     "netease_together_send_message",
     {
       title: "Send NetEase Together room message",
-      description: "Send one ordinary text message from Cove's NetEase account to the currently connected Listen Together ChatRoom. This is primarily for manual/proactive sends. If a required Cove Bridge reply is currently outstanding, the Bridge will automatically bind this send to that event and complete its reply route so the listener cannot deadlock.",
-      inputSchema: { text: z.string().trim().min(1).max(500) },
+      description: "Send one ordinary text message to the trusted Together room. First read netease_together_status and pass its current binding.bindingId. For a listener event use cove_bridge_reply with its exact eventId instead.",
+      inputSchema: {
+        text: z.string().trim().min(1).max(500),
+        bindingId: z.string().trim().min(1),
+      },
       outputSchema: {
         ok: z.literal(true),
         roomId: z.string(),
@@ -299,6 +324,7 @@ export function registerNeteaseTogetherTools(
         text: z.string(),
         code: z.number(),
       },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: [MCP_SCOPE] }] },
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -306,61 +332,11 @@ export function registerNeteaseTogetherTools(
         idempotentHint: false,
       },
     },
-    async ({ text }) => {
-      const normalized = text.trim();
-      const outstanding = queue.getOutstandingRequiredReplyEvent(eventFilter);
-
-      if (!outstanding) {
-        const result = await togetherWorker.sendChatRoomText(normalized);
-        return {
-          structuredContent: result,
-          content: [{ type: "text", text: JSON.stringify(result) }],
-        };
-      }
-
-      if (outstanding.replyRoute !== "netease.chatroom") {
-        throw new Error(`Outstanding reply route is not supported by this tool: ${outstanding.replyRoute ?? "none"}`);
-      }
-
-      const bubbles = normalizeReplyBubbles([normalized]);
-      const fingerprint = createHash("sha256")
-        .update(JSON.stringify({
-          eventId: outstanding.id,
-          route: outstanding.replyRoute,
-          messages: bubbles,
-        }))
-        .digest("hex");
-      const claim = queue.claimReply(outstanding.id, fingerprint);
-      if (claim.state === "in_progress") {
-        throw new Error(`Routed reply is already in progress: ${outstanding.id}`);
-      }
-      if (claim.state === "already_completed") {
-        throw new Error(`Routed reply is already completed: ${outstanding.id}`);
-      }
-
-      try {
-        let result = null;
-        for (let index = claim.sentCount; index < bubbles.length; index += 1) {
-          result = await togetherWorker.sendChatRoomText(bubbles[index]);
-          queue.markReplyMessageSent(outstanding.id, fingerprint);
-          if (index < bubbles.length - 1) {
-            await new Promise<void>((resolve) => setTimeout(resolve, 350));
-          }
-        }
-        if (!result) throw new Error("Routed reply has no unsent bubble to deliver.");
-        queue.markReplyCompleted(outstanding.id, fingerprint);
-        listenerWakeHub.wake("reply-completed");
-        console.warn(
-          `Cove Bridge compatibility route completed via netease_together_send_message: eventId=${outstanding.id} messages=${bubbles.length}`,
-        );
-        return {
-          structuredContent: result,
-          content: [{ type: "text", text: JSON.stringify(result) }],
-        };
-      } catch (error) {
-        queue.releaseReply(outstanding.id, fingerprint);
-        throw error;
-      }
+    async ({ text, bindingId }) => {
+      const target = togetherWorker.getReplyTarget();
+      if (!target || target.bindingId !== bindingId) throw new Error("Room binding changed; read status again.");
+      const result = await togetherWorker.sendChatRoomText(text.trim(), target);
+      return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }] };
     },
   );
 }

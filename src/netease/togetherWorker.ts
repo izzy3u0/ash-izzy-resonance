@@ -1,5 +1,8 @@
+import { randomUUID } from "node:crypto";
+import type { BoundReplyTarget } from "../types.js";
+import { safeError, SafeOperationError } from "../security.js";
 import { NeteaseApiError, NeteaseClient, type AccountProfile } from "./client.js";
-import { collectContactUserIds, parseLatestInvite } from "./inviteParser.js";
+import { parseLatestInvite } from "./inviteParser.js";
 import { buildFullLyricsModelContext, countAvailableLyricPayloads } from "./lyricsContext.js";
 import type { PlaybackStateSink } from "./playbackState.js";
 import {
@@ -16,11 +19,13 @@ import type {
   TogetherWorkerStatus,
 } from "./types.js";
 
-type EventSink = (source: string, text: string, modelContext?: string) => unknown;
+type EventSink = (source: string, text: string, modelContext?: string, replyTarget?: BoundReplyTarget) => unknown;
 
 type TogetherWorkerOptions = {
   cookie: string;
   enabled: boolean;
+  client?: NeteaseClient;
+  realtime?: NeteaseRealtimeTransport;
   inviterUid?: string;
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
@@ -70,6 +75,8 @@ type PendingPlaybackControl = {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export class TogetherWorker {
+  private boundRoom: BoundReplyTarget | null = null;
+  private inviteNotBeforeMs = Date.now();
   private readonly client: NeteaseClient;
   private readonly realtime: NeteaseRealtimeTransport;
   private readonly handledInvites = new Set<string>();
@@ -96,8 +103,11 @@ export class TogetherWorker {
   private status: TogetherWorkerStatus;
 
   constructor(private readonly options: TogetherWorkerOptions) {
-    this.client = new NeteaseClient(options.cookie);
-    this.realtime = new NeteaseRealtimeTransport(
+    if (options.enabled && !/^\d+$/.test(options.inviterUid ?? "")) {
+      throw new Error("NETEASE_INVITER_UID is required when Together is enabled");
+    }
+    this.client = options.client ?? new NeteaseClient(options.cookie);
+    this.realtime = options.realtime ?? new NeteaseRealtimeTransport(
       options.enabled,
       (message) => {
         this.handleRealtimeChatMessage(message);
@@ -124,11 +134,60 @@ export class TogetherWorker {
   }
 
   getRealtimeStatus(): RealtimeTransportStatus {
-    return this.realtime.getStatus();
+    const status = this.realtime.getStatus();
+    return {
+      ...status,
+      lastError: status.lastError ? "realtime_unavailable" : null,
+      lastChatMessage: this.boundRoom && status.roomId === this.boundRoom.roomId
+        && status.chatRoomId === this.boundRoom.chatRoomId && status.lastChatMessage?.senderId === this.options.inviterUid
+        ? status.lastChatMessage : null,
+    };
   }
 
-  async sendChatRoomText(text: string): Promise<RealtimeChatSendResult> {
+  getReplyTarget(): BoundReplyTarget | null {
+    return this.boundRoom?.chatRoomId ? { ...this.boundRoom } : null;
+  }
+
+  isCurrentReplyTarget(target: BoundReplyTarget): boolean {
+    const current = this.boundRoom;
+    return Boolean(current && current.roomId === this.roomId
+      && current.bindingId === target.bindingId
+      && current.roomId === target.roomId && current.chatRoomId === target.chatRoomId);
+  }
+
+  private assertRoomBinding(target = this.boundRoom): BoundReplyTarget {
+    if (!target || !this.isCurrentReplyTarget(target)) {
+      throw new Error("No trusted Together room binding; invite the account again.");
+    }
+    return target;
+  }
+
+  async verifyBoundRoom(target = this.boundRoom): Promise<BoundReplyTarget> {
+    const expected = { ...this.assertRoomBinding(target) };
+    const remote = await this.client.getRoomStatus();
+    if (!remote.inRoom || remote.roomId !== expected.roomId
+      || (remote.chatRoomId && remote.chatRoomId !== expected.chatRoomId)
+      || !this.isCurrentReplyTarget(expected)) {
+      this.leaveRoom("Together room binding ended.");
+      throw new Error("Together room binding changed; operation refused.");
+    }
+    return expected;
+  }
+
+  async sendChatRoomText(text: string, target?: BoundReplyTarget): Promise<RealtimeChatSendResult> {
+    const expected = await this.verifyBoundRoom(target);
+    this.assertRoomBinding(expected);
+    const realtime = this.realtime.getStatus();
+    if (!realtime.connected || realtime.roomId !== expected.roomId || realtime.chatRoomId !== expected.chatRoomId) {
+      throw new Error("Trusted Together realtime is not connected.");
+    }
     return await this.realtime.sendChatRoomText(text);
+  }
+
+  private emitRoomEvent(source: string, text: string, context?: string): void {
+    const target = this.getReplyTarget();
+    if (!target) return;
+    this.options.onEvent(source, text, context, target);
   }
 
   async leaveTogether(): Promise<{
@@ -150,7 +209,13 @@ export class TogetherWorker {
       };
     }
 
+    const expected = this.assertRoomBinding();
+    if (remote.roomId !== expected.roomId) {
+      this.leaveRoom("Together room binding changed.");
+      throw new Error("Refusing to end an unbound room; exit it in the NetEase app.");
+    }
     const roomId = remote.roomId;
+    this.inviteNotBeforeMs = Date.now();
     await this.client.endRoom(roomId);
     const confirmed = await this.client.getRoomStatus();
     if (confirmed.inRoom) {
@@ -176,6 +241,7 @@ export class TogetherWorker {
   }
 
   async gotoPlayback(songId: string): Promise<PlaybackControlResult> {
+    const binding = await this.verifyBoundRoom();
     const targetSongId = songId.trim();
     if (!/^\d+$/.test(targetSongId)) {
       throw new Error("NetEase target songId must be numeric.");
@@ -185,6 +251,7 @@ export class TogetherWorker {
     }
 
     const playlist = await this.client.getTogetherPlaylist(this.roomId);
+    this.assertRoomBinding(binding);
     if (!playlist.displayList.includes(targetSongId)) {
       throw new Error(
         `NetEase GOTO target is not in the current Together displayList: ${targetSongId}. Enqueue it before GOTO.`,
@@ -195,6 +262,7 @@ export class TogetherWorker {
   }
 
   async nextPlayback(): Promise<PlaybackControlResult> {
+    const binding = await this.verifyBoundRoom();
     if (!this.roomId) throw new Error("NetEase Listen Together is not currently in a room.");
     const currentSongId = this.latestPlaying?.songId ?? this.status.currentSong?.id ?? null;
     if (!currentSongId) throw new Error("NetEase current playback state is unavailable.");
@@ -217,11 +285,13 @@ export class TogetherWorker {
       throw new Error("NetEase playback changed while resolving NEXT; retry the command.");
     }
 
+    this.assertRoomBinding(binding);
     const targetSongId = playlist.displayList[(currentIndex + 1) % playlist.displayList.length];
     return await this.gotoPlayback(targetSongId);
   }
 
   async enqueueNext(songId: string): Promise<QueueMutationResult> {
+    const binding = await this.verifyBoundRoom();
     const targetSongId = songId.trim();
     if (!/^\d+$/.test(targetSongId)) {
       throw new Error("NetEase target songId must be numeric.");
@@ -270,6 +340,7 @@ export class TogetherWorker {
         throw new Error("NetEase playback changed while resolving ENQUEUE_NEXT; retry the command.");
       }
 
+      this.assertRoomBinding(binding);
       await this.client.replaceTogetherPlaylist({
         roomId,
         userId: accountId,
@@ -286,6 +357,7 @@ export class TogetherWorker {
       while (Date.now() < deadline) {
         await sleep(250);
         const confirmed = await this.client.getTogetherPlaylist(roomId);
+        this.assertRoomBinding(binding);
         const confirmedCurrentIndex = confirmed.displayList.indexOf(currentSongId);
         const confirmedNext = confirmedCurrentIndex >= 0
           ? confirmed.displayList[(confirmedCurrentIndex + 1) % confirmed.displayList.length]
@@ -324,10 +396,20 @@ export class TogetherWorker {
     void this.run();
   }
 
+  private async validateAccountSession(): Promise<void> {
+    const profile = await this.client.getAccountProfile();
+    if (profile.id === this.options.inviterUid) throw new SafeOperationError("same_account_configuration", "Ash and inviter must use different accounts.");
+    this.accountProfile = profile;
+    this.status.accountId = profile.id;
+  }
+
+  async searchSongs(query: string, limit: number) {
+    return await this.client.searchSongs(query, limit);
+  }
+
   private async run(): Promise<void> {
     try {
-      this.accountProfile = await this.client.getAccountProfile();
-      this.status.accountId = this.accountProfile.id;
+      await this.validateAccountSession();
       this.status.phase = "waiting_invite";
       console.log(`NetEase Together worker ready for account ${this.status.accountId}`);
     } catch (error) {
@@ -337,10 +419,7 @@ export class TogetherWorker {
     while (this.running) {
       const startedAt = Date.now();
       try {
-        if (!this.status.accountId) {
-          this.accountProfile = await this.client.getAccountProfile();
-          this.status.accountId = this.accountProfile.id;
-        }
+        if (!this.status.accountId) await this.validateAccountSession();
         await this.pollOnce();
         this.errorStreak = 0;
         this.status.lastError = null;
@@ -365,12 +444,19 @@ export class TogetherWorker {
     const remote = await this.client.getRoomStatus();
 
     if (remote.inRoom && remote.roomId) {
-      if (this.roomId !== remote.roomId) {
-        this.enterRoom(remote.roomId, remote.chatRoomId);
-      } else if (remote.chatRoomId && remote.chatRoomId !== this.chatRoomId) {
-        this.chatRoomId = remote.chatRoomId;
+      if (!this.boundRoom || remote.roomId !== this.boundRoom.roomId) {
+        this.leaveRoom("Unbound Together room detected.");
+        throw new SafeOperationError("unbound_room", "Unbound Together room detected; exit it and send a fresh invitation.");
       }
-      if (remote.chatRoomId) await this.ensureRealtime(remote.roomId, remote.chatRoomId);
+      if (remote.chatRoomId && this.boundRoom.chatRoomId && remote.chatRoomId !== this.boundRoom.chatRoomId) {
+        this.leaveRoom("Together ChatRoom changed.");
+        throw new Error("Together ChatRoom changed; send a fresh invitation.");
+      }
+      if (remote.chatRoomId) {
+        this.chatRoomId = remote.chatRoomId;
+        this.boundRoom.chatRoomId = remote.chatRoomId;
+        await this.ensureRealtime(remote.roomId, remote.chatRoomId);
+      }
     } else if (this.roomId) {
       this.leaveRoom("一起听已经结束了。我会继续等你的下一次邀请。");
     }
@@ -389,7 +475,9 @@ export class TogetherWorker {
     const realtimeConnected = this.realtime.getStatus().connected;
     let playbackHandling = Promise.resolve();
     if (this.shouldReconcilePlayback(now, realtimeConnected)) {
+      const expected = this.boundRoom;
       const playing = await this.client.getPlaying(this.roomId);
+      if (!expected || !this.isCurrentReplyTarget(expected)) return;
       const observedAtMs = Date.now();
       this.lastPlaybackReconcileAt = observedAtMs;
       playbackHandling = this.applyPlayback(playing, observedAtMs, "http");
@@ -400,6 +488,10 @@ export class TogetherWorker {
   }
 
   private async ensureRealtime(roomId: string, chatRoomId: string): Promise<void> {
+    if (!this.boundRoom || this.boundRoom.roomId !== roomId || this.boundRoom.chatRoomId !== chatRoomId) {
+      throw new Error("Realtime connection requires a trusted room binding.");
+    }
+    const binding = { ...this.boundRoom };
     const realtimeStatus = this.realtime.getStatus();
     if (
       realtimeStatus.connected
@@ -413,28 +505,33 @@ export class TogetherWorker {
 
     try {
       const credentials = await this.client.getRealtimeCredentials();
+      this.assertRoomBinding(binding);
       console.log(
         `NetEase NIM realtime credentials acquired for account ${this.status.accountId ?? "unknown"}; addresses=${credentials.addresses.length}`,
       );
-      if (!this.accountProfile) {
-        this.accountProfile = await this.client.getAccountProfile();
-        this.status.accountId = this.accountProfile.id;
-      }
+      if (!this.accountProfile) await this.validateAccountSession();
+      const profile = this.accountProfile;
+      if (!profile) throw new Error("Account validation required.");
+      this.assertRoomBinding(binding);
       await this.realtime.connect({
         roomId,
         chatRoomId,
         credentials,
         memberProfile: {
-          userId: this.accountProfile.id,
-          ...(this.accountProfile.nickname ? { nick: this.accountProfile.nickname } : {}),
-          ...(this.accountProfile.avatarUrl ? { avatar: this.accountProfile.avatarUrl } : {}),
-          ...(this.accountProfile.gender !== null ? { gender: this.accountProfile.gender } : {}),
+          userId: profile.id,
+          ...(profile.nickname ? { nick: profile.nickname } : {}),
+          ...(profile.avatarUrl ? { avatar: profile.avatarUrl } : {}),
+          ...(profile.gender !== null ? { gender: profile.gender } : {}),
         },
       });
+      if (!this.isCurrentReplyTarget(binding)) {
+        await this.realtime.disconnect();
+        return;
+      }
       console.log(`NetEase NIM realtime connected: roomId=${roomId} chatRoomId=${chatRoomId}`);
     } catch (error) {
       this.realtime.recordConnectionError(error);
-      const detail = error instanceof Error ? error.message : "unknown error";
+      const detail = safeError(error);
       console.error(`NetEase NIM realtime connect failed: ${detail}`);
     }
   }
@@ -442,38 +539,43 @@ export class TogetherWorker {
   private async findInvite(): Promise<TogetherInvite | null> {
     const ownId = this.status.accountId;
     if (!ownId) return null;
-    let contactIds: string[];
-
-    if (this.options.inviterUid) {
-      contactIds = [this.options.inviterUid];
-    } else {
-      const contacts = await this.client.getRecentContacts();
-      contactIds = collectContactUserIds(contacts, ownId);
-    }
+    if (!this.options.inviterUid) throw new Error("No allowed inviter configured.");
+    const contactIds = [this.options.inviterUid];
 
     for (const uid of contactIds) {
       const history = await this.client.getPrivateHistory(uid);
       const invite = parseLatestInvite(history, uid);
-      if (invite && !this.handledInvites.has(invite.roomId)) return invite;
+      if (invite && invite.inviterId === this.options.inviterUid
+        && invite.messageTime >= this.inviteNotBeforeMs
+        && !this.handledInvites.has(invite.roomId + ":" + invite.messageTime)) return invite;
     }
     return null;
   }
 
   private async acceptInvite(invite: TogetherInvite): Promise<void> {
+    if (!this.options.inviterUid || invite.inviterId !== this.options.inviterUid) {
+      throw new Error("Invitation sender is not allowed.");
+    }
     this.status.phase = "joining";
-    this.handledInvites.add(invite.roomId);
+    const inviteKey = invite.roomId + ":" + invite.messageTime;
+    this.handledInvites.add(inviteKey);
     if (this.handledInvites.size > 50) {
       const oldest = this.handledInvites.values().next().value as string | undefined;
       if (oldest) this.handledInvites.delete(oldest);
     }
     try {
       const accepted = await this.client.acceptInvite(invite.roomId, invite.inviterId);
-      this.enterRoom(accepted.roomId ?? invite.roomId, accepted.chatRoomId);
-      if (accepted.roomId && accepted.chatRoomId) {
-        await this.ensureRealtime(accepted.roomId, accepted.chatRoomId);
+      if (!accepted.inRoom || accepted.roomId !== invite.roomId) {
+        throw new Error("Accepted room does not match the allowed invitation.");
       }
+      const remote = await this.client.getRoomStatus();
+      if (!remote.inRoom || remote.roomId !== invite.roomId) {
+        throw new Error("Invitation acceptance was not confirmed.");
+      }
+      this.enterRoom(invite.roomId, remote.chatRoomId ?? accepted.chatRoomId);
+      if (this.chatRoomId) await this.ensureRealtime(invite.roomId, this.chatRoomId);
     } catch (error) {
-      this.handledInvites.delete(invite.roomId);
+      this.handledInvites.delete(inviteKey);
       throw error;
     }
   }
@@ -485,6 +587,7 @@ export class TogetherWorker {
       void this.realtime.disconnect();
       this.nextPlaybackClientSeq = 1;
     }
+    this.boundRoom = { roomId, chatRoomId: chatRoomId ?? "", bindingId: randomUUID() };
     this.roomId = roomId;
     this.chatRoomId = chatRoomId;
     this.previousSongId = null;
@@ -507,6 +610,7 @@ export class TogetherWorker {
   private leaveRoom(message: string): void {
     const wasInRoom = Boolean(this.roomId);
     this.rejectPendingPlaybackControl("NetEase Listen Together ended before playback control confirmation.");
+    this.boundRoom = null;
     this.roomId = null;
     this.chatRoomId = null;
     this.previousSongId = null;
@@ -547,6 +651,7 @@ export class TogetherWorker {
     commandType: "PLAY" | "PAUSE" | "GOTO",
     requestedTargetSongId?: string,
   ): Promise<PlaybackControlResult> {
+    const binding = await this.verifyBoundRoom();
     if (this.pendingPlaybackControl) {
       throw new Error(
         `NetEase playback control already pending: ${this.pendingPlaybackControl.commandType}`,
@@ -607,6 +712,7 @@ export class TogetherWorker {
     };
 
     try {
+      this.assertRoomBinding(binding);
       await this.client.reportPlaybackCommand({
         roomId,
         commandType,
@@ -727,13 +833,16 @@ export class TogetherWorker {
       ...(serverSeq === undefined ? {} : { serverSeq }),
     }));
 
-    const handling = this.playbackHandlingTail.then(() => this.handlePlaying(playing));
+    const binding = this.boundRoom;
+    const handling = this.playbackHandlingTail.then(() => {
+      if (binding && this.isCurrentReplyTarget(binding)) return this.handlePlaying(playing);
+    });
     this.playbackHandlingTail = handling.catch(() => {});
     return handling;
   }
 
   private handleRealtimePlaybackEvent(event: RealtimePlaybackEvent): void {
-    if (!this.roomId) return;
+    if (!this.roomId || !this.boundRoom) return;
 
     const knownStatus = this.status.playStatus;
     const playStatus = event.playStatus === "UNKNOWN" && knownStatus !== "UNKNOWN"
@@ -754,28 +863,32 @@ export class TogetherWorker {
       .catch((error) => {
         const detail = error instanceof NeteaseApiError
           ? `${error.operation}${error.code === null ? "" : ` code=${error.code}`}`
-          : error instanceof Error ? error.message : "unknown error";
+          : safeError(error);
         console.error(`Together realtime playback handling failed: ${detail}`);
       });
   }
 
   private async handlePlaying(playing: PlayingState): Promise<void> {
+    const binding = this.boundRoom;
+    if (!binding) return;
     this.status.playStatus = playing.playStatus;
     const statusChanged = this.previousPlayStatus !== playing.playStatus;
 
     if (playing.songId && playing.songId !== this.previousSongId) {
       const song = await this.client.getSongDetails(playing.songId);
+      if (!this.isCurrentReplyTarget(binding)) return;
       this.previousSongId = playing.songId;
       this.currentLyricsModelContext = null;
       this.status.currentSong = song;
       this.updateState((sink) => sink.updateSong(song));
       const lyricsContext = await this.loadLyrics(song);
+      if (!this.isCurrentReplyTarget(binding)) return;
 
       if (playing.playStatus === "PLAY") {
         const prefix = this.joinedPending
           ? "你把我拉进一起听啦。现在播放"
           : "你换到了";
-        this.options.onEvent(
+        this.emitRoomEvent(
           "netease.music_changed",
           `${prefix}《${song.name}》— ${song.artist}。请结合我们的对话自然回应；如果没必要点评，也可以只安静陪听。`,
           lyricsContext,
@@ -784,14 +897,14 @@ export class TogetherWorker {
       }
     } else if (statusChanged && this.previousPlayStatus !== "UNKNOWN") {
       if (playing.playStatus === "PAUSE") {
-        this.options.onEvent(
+        this.emitRoomEvent(
           "netease.playback",
           "一起听暂停了。",
           this.currentLyricsModelContext ?? undefined,
         );
       } else if (playing.playStatus === "PLAY") {
         const song = this.status.currentSong;
-        this.options.onEvent(
+        this.emitRoomEvent(
           "netease.playback",
           song
             ? `一起听继续播放：《${song.name}》— ${song.artist}。`
@@ -806,6 +919,7 @@ export class TogetherWorker {
   }
 
   private handleRealtimeChatMessage(message: RealtimeChatRoomMessage): void {
+    if (!this.boundRoom || message.senderId !== this.options.inviterUid) return;
     if (message.category !== "text" || !message.text) return;
     const ownAccountId = this.status.accountId;
     if (ownAccountId && message.senderId === ownAccountId) return;
@@ -826,7 +940,7 @@ export class TogetherWorker {
       this.handledChatMessageKeys.delete(oldest);
     }
 
-    this.options.onEvent(
+    this.emitRoomEvent(
       "netease.chatroom",
       message.text,
       this.currentLyricsModelContext ?? undefined,
@@ -834,8 +948,10 @@ export class TogetherWorker {
   }
 
   private async loadLyrics(song: SongDetails): Promise<string | undefined> {
+    const binding = this.boundRoom;
     try {
       const lyrics = await this.client.getLyrics(song.id);
+      if (!binding || !this.isCurrentReplyTarget(binding)) return undefined;
       this.updateState((sink) => sink.updateLyrics(song.id, lyrics));
       const modelContext = buildFullLyricsModelContext(song, lyrics);
       this.currentLyricsModelContext = modelContext;
@@ -846,10 +962,11 @@ export class TogetherWorker {
       }
       return modelContext ?? undefined;
     } catch (error) {
+      if (!binding || !this.isCurrentReplyTarget(binding)) return undefined;
       this.currentLyricsModelContext = null;
       const detail = error instanceof NeteaseApiError
         ? `${error.operation}${error.code === null ? "" : ` code=${error.code}`}`
-        : error instanceof Error ? error.message : "unknown error";
+        : safeError(error);
       console.error(`Together lyrics load failed: ${detail}`);
       return undefined;
     }
@@ -860,7 +977,7 @@ export class TogetherWorker {
     try {
       update(this.options.stateSink);
     } catch (error) {
-      const detail = error instanceof Error ? error.message : "unknown error";
+      const detail = safeError(error);
       console.error(`Together state update failed: ${detail}`);
     }
   }
@@ -870,7 +987,7 @@ export class TogetherWorker {
     this.status.phase = this.errorStreak >= 3 ? "error" : "backoff";
     const detail = error instanceof NeteaseApiError
       ? `${error.operation}${error.code === null ? "" : ` code=${error.code}`}`
-      : error instanceof Error ? error.message : "unknown error";
+      : safeError(error);
     this.status.lastError = `${prefix}: ${detail}`;
     console.error(this.status.lastError);
   }
@@ -879,25 +996,29 @@ export class TogetherWorker {
 export function createTogetherWorker(
   onEvent: EventSink,
   stateSink?: PlaybackStateSink,
+  env: NodeJS.ProcessEnv = process.env,
 ): TogetherWorker {
-  const cookie = process.env.NETEASE_COOKIE?.trim() ?? "";
+  const cookie = env.NETEASE_COOKIE?.trim() ?? "";
   const explicitlyDisabled = /^(0|false|off|no)$/i.test(
-    process.env.TOGETHER_ENABLED?.trim() ?? "",
+    env.TOGETHER_ENABLED?.trim() ?? "",
   );
-  const enabled = Boolean(cookie) && !explicitlyDisabled;
+  const enabled = !explicitlyDisabled;
   const parseInterval = (name: string, fallback: number) => {
-    const value = Number(process.env[name]);
+    const value = Number(env[name]);
     return Number.isFinite(value) && value >= 1000 ? value : fallback;
   };
 
-  if (cookie && !cookie.includes("MUSIC_U=")) {
-    console.warn("NETEASE_COOKIE is set but MUSIC_U is missing; Together worker may not authenticate.");
+  if (enabled && !/(?:^|;\s*)MUSIC_U=[^;\s]+/.test(cookie)) {
+    throw new Error("NETEASE_COOKIE must contain a nonempty MUSIC_U session.");
+  }
+  if (enabled && !/^\d+$/.test(env.NETEASE_INVITER_UID?.trim() ?? "")) {
+    throw new Error("NETEASE_INVITER_UID is required.");
   }
 
   return new TogetherWorker({
     cookie,
     enabled,
-    inviterUid: process.env.NETEASE_INVITER_UID?.trim() || undefined,
+    inviterUid: env.NETEASE_INVITER_UID?.trim() || undefined,
     pollIntervalMs: parseInterval("TOGETHER_POLL_INTERVAL_MS", 4000),
     heartbeatIntervalMs: parseInterval("TOGETHER_HEARTBEAT_INTERVAL_MS", 10_000),
     playbackReconcileIntervalMs: parseInterval("TOGETHER_PLAYBACK_RECONCILE_INTERVAL_MS", 30_000),

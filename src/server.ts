@@ -1,50 +1,51 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { pathToFileURL } from "node:url";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { createMcpAccess, oauthConfigFromEnv, validIngestToken, type McpAccess } from "./auth.js";
 import { createMcpServer } from "./mcp.js";
 import { buildBridgeEvent } from "./bridge/events.js";
 export { buildBridgeEvent } from "./bridge/events.js";
 import { MCP_PATHS } from "./profiles.js";
 import { listenerWakeHub } from "./listenerWake.js";
 import { PlaybackStateStore } from "./netease/playbackState.js";
-import { createTogetherWorker } from "./netease/togetherWorker.js";
+import { createTogetherWorker, type TogetherWorker } from "./netease/togetherWorker.js";
 import { InMemoryEventQueue } from "./queue.js";
 
-const PORT = Number(process.env.PORT ?? 8787);
-const INGEST_TOKEN = process.env.BRIDGE_INGEST_TOKEN ?? "";
-const UNIX_SOCKET = process.env.BRIDGE_UNIX_SOCKET?.trim() ?? "";
-const queue = new InMemoryEventQueue();
-const playbackState = new PlaybackStateStore();
+export type ServerOptions = {
+  access: McpAccess;
+  queue: InMemoryEventQueue;
+  playbackState: PlaybackStateStore;
+  togetherWorker: TogetherWorker;
+  ingestToken?: string;
+};
 
-function enqueueTogetherEvent(
-  source: string,
-  text: string,
-  additionalModelContext?: string,
-): boolean {
-  const id = randomUUID();
-  const created = queue.enqueue(buildBridgeEvent(
-    id,
-    source,
-    text,
-    new Date().toISOString(),
-    additionalModelContext,
-  ));
-  if (created) listenerWakeHub.wake(source);
-  return created;
+export function createRuntime(): ServerOptions {
+  // Fail closed before listening or starting any provider connection.
+  const access = createMcpAccess(oauthConfigFromEnv());
+  const ingestToken = process.env.BRIDGE_INGEST_TOKEN?.trim() ?? "";
+  if (ingestToken && ingestToken.length < 32) throw new Error("BRIDGE_INGEST_TOKEN must contain at least 32 characters");
+  const queue = new InMemoryEventQueue();
+  const playbackState = new PlaybackStateStore();
+  const togetherWorker = createTogetherWorker((source, text, context, replyTarget) => {
+    const event = buildBridgeEvent(randomUUID(), source, text, new Date().toISOString(), context);
+    event.replyTarget = replyTarget;
+    if (queue.enqueue(event)) listenerWakeHub.wake(source);
+  }, playbackState);
+  return { access, ingestToken, queue, playbackState, togetherWorker };
 }
-
-const togetherWorker = createTogetherWorker(enqueueTogetherEvent, playbackState);
 
 const eventInput = z.object({
   eventId: z.string().trim().min(1).max(200).optional(),
-  source: z.string().trim().min(1).max(80).default("test"),
+  // Generic ingestion must never impersonate a trusted NetEase room.
+  source: z.string().trim().min(1).max(80).refine((s) => !s.toLowerCase().startsWith("netease")).default("test"),
   text: z.string().trim().min(1).max(4000),
 });
 
 function writeJson(res: ServerResponse, status: number, value: unknown): void {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   res.end(JSON.stringify(value));
 }
 
@@ -57,122 +58,101 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
     if (size > 64 * 1024) throw new Error("request_too_large");
     chunks.push(buffer);
   }
-  const body = Buffer.concat(chunks).toString("utf8");
-  return body ? JSON.parse(body) : {};
+  return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
-function authorized(req: IncomingMessage): boolean {
-  return !INGEST_TOKEN || req.headers.authorization === `Bearer ${INGEST_TOKEN}`;
-}
+export function createHttpServer(options: ServerOptions = createRuntime()) {
+  const { access, queue, playbackState, togetherWorker } = options;
+  const server = createServer(async (req, res) => {
+    if (!req.url || !req.method) { res.writeHead(400).end(); return; }
+    const url = new URL(req.url, "http://localhost");
 
-export function createHttpServer() {
-  return createServer(async (req, res) => {
-    if (!req.url || !req.method) {
-      res.writeHead(400).end("Bad Request");
-      return;
-    }
-    const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
-
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id, WWW-Authenticate");
+    res.setHeader("X-Content-Type-Options", "nosniff");
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "POST, GET, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "content-type, authorization, mcp-session-id",
-        "Access-Control-Expose-Headers": "Mcp-Session-Id",
-      });
-      res.end();
+        "Access-Control-Allow-Headers": "content-type, authorization, mcp-session-id, mcp-protocol-version",
+      }).end();
       return;
     }
-
-    if (req.method === "GET" && url.pathname === "/") {
-      writeJson(res, 200, {
-        ok: true,
-        service: "cove-bridge",
-        version: "0.1.0",
-        queue: queue.status(),
-        listener: listenerWakeHub.status(),
-      });
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz")) {
+      writeJson(res, 200, { ok: true, service: "cove-bridge", version: "0.2.0" });
       return;
     }
-
-    if (req.method === "GET" && url.pathname === "/listener/events") {
-      const authorization = req.headers.authorization ?? "";
-      const bearerToken = authorization.startsWith("Bearer ")
-        ? authorization.slice("Bearer ".length).trim()
-        : "";
-      const token = bearerToken || url.searchParams.get("session")?.trim() || "";
+    if (req.method === "GET" && [
+      "/.well-known/oauth-protected-resource",
+      "/.well-known/oauth-protected-resource/mcp",
+      "/.well-known/oauth-protected-resource/mcp/music",
+    ].includes(url.pathname)) {
+      writeJson(res, 200, access.metadata);
+      return;
+    }
+    if (url.pathname === "/listener/events" && req.method === "GET") {
+      const bearer = req.headers.authorization?.match(/^Bearer (\S+)$/i)?.[1];
+      const token = bearer ?? url.searchParams.get("session") ?? "";
       const session = token ? listenerWakeHub.consumeSession(token) : null;
-      if (!session) {
-        writeJson(res, 401, { error: "invalid_or_expired_listener_session" });
-        return;
-      }
+      if (!session) { writeJson(res, 401, { error: "invalid_or_expired_listener_session" }); return; }
       listenerWakeHub.subscribe(res, session.expiresAtMs);
       return;
     }
-
-    if (req.method === "POST" && url.pathname === "/events") {
-      if (!authorized(req)) {
-        writeJson(res, 401, { error: "unauthorized" });
-        return;
+    if (url.pathname === "/events" && req.method === "POST") {
+      if (!options.ingestToken) { writeJson(res, 404, { error: "not_found" }); return; }
+      if (!validIngestToken(options.ingestToken, req.headers.authorization)) {
+        writeJson(res, 401, { error: "unauthorized" }); return;
       }
       try {
         const parsed = eventInput.safeParse(await readJson(req));
-        if (!parsed.success) {
-          writeJson(res, 400, { error: parsed.error.flatten() });
-          return;
-        }
-        const createdAt = new Date().toISOString();
+        if (!parsed.success) { writeJson(res, 400, { error: "invalid_event" }); return; }
         const id = parsed.data.eventId ?? randomUUID();
-        const event = buildBridgeEvent(id, parsed.data.source, parsed.data.text, createdAt);
-        const created = queue.enqueue(event);
+        const created = queue.enqueue(buildBridgeEvent(id, parsed.data.source, parsed.data.text));
         if (created) listenerWakeHub.wake(parsed.data.source);
         writeJson(res, created ? 201 : 200, { ok: true, created, eventId: id });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "invalid_request";
-        writeJson(res, message === "request_too_large" ? 413 : 400, { error: message });
-      }
+      } catch { writeJson(res, 400, { error: "invalid_event" }); }
       return;
     }
-
-    const mcpMethods = new Set(["POST", "GET", "DELETE"]);
-    const mcpProfile = MCP_PATHS.get(url.pathname);
-    if (mcpProfile && mcpMethods.has(req.method)) {
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
-      const server = createMcpServer(queue, playbackState, togetherWorker, mcpProfile);
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-        enableJsonResponse: true,
-      });
-      res.on("close", () => {
-        void transport.close();
-        void server.close();
-      });
-      try {
-        await server.connect(transport);
-        await transport.handleRequest(req, res);
-      } catch (error) {
-        console.error("MCP request failed", error);
+    const profile = MCP_PATHS.get(url.pathname);
+    if (profile) {
+      try { await access.verify(req.headers.authorization); }
+      catch {
+        res.setHeader("WWW-Authenticate", access.challenge);
+        writeJson(res, 401, { error: "unauthorized" }); return;
+      }
+      if (!["POST", "GET", "DELETE"].includes(req.method)) {
+        res.writeHead(405, { Allow: "POST, GET, DELETE" }).end(); return;
+      }
+      const mcp = createMcpServer(queue, playbackState, togetherWorker, profile);
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+      res.on("close", () => { void transport.close(); void mcp.close(); });
+      try { await mcp.connect(transport); await transport.handleRequest(req, res); }
+      catch {
+        console.error("MCP request failed");
         if (!res.headersSent) writeJson(res, 500, { error: "internal_server_error" });
       }
       return;
     }
-
-    res.writeHead(404).end("Not Found");
+    writeJson(res, 404, { error: "not_found" });
   });
+  server.headersTimeout = 15_000;
+  return server;
 }
 
-if (process.env.NODE_ENV !== "test") {
-  createHttpServer().listen(PORT, "0.0.0.0", () => {
-    console.log("Cove Resonance listening on http://0.0.0.0:" + PORT + " (MCP: /mcp, /mcp/music)");
-    togetherWorker.start();
-  });
-
-  if (UNIX_SOCKET) {
-    if (existsSync(UNIX_SOCKET)) unlinkSync(UNIX_SOCKET);
-    createHttpServer().listen(UNIX_SOCKET, () => {
-      chmodSync(UNIX_SOCKET, 0o666);
-      console.log("Cove Resonance listening on unix://" + UNIX_SOCKET + " (MCP: /mcp, /mcp/music)");
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    const runtime = createRuntime();
+    const port = Number(process.env.PORT ?? 8787);
+    createHttpServer(runtime).listen(port, "0.0.0.0", () => {
+      console.log("Cove Resonance listening (authenticated MCP)");
+      runtime.togetherWorker.start();
     });
+    const socket = process.env.BRIDGE_UNIX_SOCKET?.trim();
+    if (socket) {
+      if (existsSync(socket)) unlinkSync(socket);
+      createHttpServer(runtime).listen(socket, () => chmodSync(socket, 0o600));
+    }
+  } catch {
+    console.error("Startup refused: invalid or missing OAuth/NetEase configuration. See docs/PHASE1.zh-CN.md.");
+    process.exitCode = 1;
   }
 }
