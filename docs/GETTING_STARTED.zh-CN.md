@@ -1,6 +1,7 @@
 # Cove Resonance 从零部署教程
 
 > **本 Fork 的安全配置以 [第一阶段说明](PHASE1.zh-CN.md) 为准。** 必须配置 OAuth 和主号 UID；不能匿名连接 MCP，不能直接接管服务启动前的房间。下文保留上游部署背景，不是完整的本分支配置清单。
+> 先用 Windows 电脑进行真实验收，请使用新版 **[第一次真实验收教程](FIRST_REAL_ACCEPTANCE.zh-CN.md)**，不要直接套用下方历史部署步骤。
 
 这份教程面向第一次部署 Cove Resonance 的人。目标是完成下面这一条链：
 

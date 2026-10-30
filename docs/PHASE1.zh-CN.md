@@ -2,6 +2,8 @@
 
 本分支的配置、安全与验收以本文为准。上游 README、V2 与架构文档保留历史背景；其中匿名 MCP、可省略 eventId、误传 ID 自动纠正等旧说明不适用于本分支。
 
+第一次使用 Windows 本机验收，请阅读配套的 **[《第一次真实验收教程》](FIRST_REAL_ACCEPTANCE.zh-CN.md)**。其中包含从零配置 Auth0、临时 HTTPS 地址、Cookie 本机保管与逐项验收步骤；本文件保留安全契约和变量速查。
+
 本阶段没有数据库、新 UI、人格设置或长期记忆，也没有部署。one-earbud 保持独立。原有账号歌单、喜欢、历史、每日推荐实现暂时留在源码，但不再注册到 /mcp 或 /mcp/music；仅开放搜歌、一起听和 Bridge 工具。
 
 ## 1. 采用什么鉴权
@@ -87,7 +89,7 @@ Cookie 只在可信设备本地取得，然后由你直接填入服务器秘密�
 
 ## 5. 最小部署准备与命令
 
-准备 Linux x86_64、Node 22、可访问网易云和 Auth0 的网络，以及公开 HTTPS 地址。Docker 使用仓库 Debian/glibc 的 node:22-slim，不用 Alpine。正常部署安装需要下载 node-nim 的原生 SDK。
+本机验收可使用 Windows x64、Node 22 和临时 HTTPS 隧道，步骤见配套教程；真实 NIM 连接仍需人工验收。未来服务器准备 Linux x86_64、Node 22、可访问网易云和 Auth0 的网络，以及公开 HTTPS 地址。Docker 使用仓库 Debian/glibc 的 node:22-slim，不用 Alpine。正常安装需要下载 node-nim 对应平台的原生 SDK，不能把 Windows node_modules 复制到 Linux。
 
 仅当你开始部署时执行：
 

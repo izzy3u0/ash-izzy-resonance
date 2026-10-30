@@ -1,6 +1,7 @@
 # Cove Resonance
 
 > 本 Fork 已进入第一阶段安全改造。部署与真实验收请优先阅读 **[第一阶段配置与验收说明](docs/PHASE1.zh-CN.md)**。
+> 第一次从 Windows 本机开始，请照着 **[第一次真实验收教程](docs/FIRST_REAL_ACCEPTANCE.zh-CN.md)** 操作：包含 Auth0、临时 HTTPS、登录配置与逐项核对。
 > `/mcp` 和 `/mcp/music` 均强制 OAuth；只接受指定主号的新邀请。歌单、喜欢、历史、每日推荐工具暂不开放。
 > 本阶段采用 Auth0 托管登录，不新增 UI 或数据库；上游下方的历史部署说明需结合第一阶段文档使用。
 
