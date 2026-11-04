@@ -677,7 +677,8 @@ export class NeteaseRealtimeTransport {
 
       const message = decodeRealtimeChatRoomMessage(args[1], receivedAtMs);
       if (!message) return;
-      this.status.lastChatMessage = message;
+      // Protocol-only custom events must not erase the last readable chat message.
+      if (message.text !== null) this.status.lastChatMessage = message;
       const sender = message.senderId ? `***${message.senderId.slice(-4)}` : "unknown";
       const messageId = message.messageId ? `***${message.messageId.slice(-6)}` : "unknown";
       console.log(

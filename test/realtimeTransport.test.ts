@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { EventEmitter } from "node:events";
 import { buildPlaybackDiagnostic, decodeRealtimePlaybackEvent, NeteaseRealtimeTransport } from "../src/netease/realtimeTransport.js";
+import { capturedProbeText, capturedRoomStatusMessage, capturedUserTextMessage } from "./chatroomMessageFixtures.js";
 
 test("decodes event_type=20000 config string playback event", () => {
   const event = decodeRealtimePlaybackEvent({
@@ -81,6 +83,24 @@ test("realtime status never contains credentials", () => {
   assert.equal("token" in status, false);
   assert.equal("cookie" in status, false);
   assert.equal("addresses" in status, false);
+});
+
+test("protocol-only custom events do not erase the last readable ChatRoom message", () => {
+  const received: Array<{ text: string | null }> = [];
+  const transport = new NeteaseRealtimeTransport(false, message => received.push(message));
+  const emitter = new EventEmitter();
+  const internals = transport as unknown as { installRuntimeHandlers(value: unknown): void; roomNumber: number };
+  internals.roomNumber = 123;
+  internals.installRuntimeHandlers(emitter);
+
+  emitter.emit("receiveMsg", 123, capturedRoomStatusMessage());
+  assert.equal(transport.getStatus().lastChatMessage, null);
+  emitter.emit("receiveMsg", 123, capturedUserTextMessage());
+  emitter.emit("receiveMsg", 123, capturedRoomStatusMessage("12345", "new-status-fixture"));
+  assert.equal(transport.getStatus().lastChatMessage?.text, capturedProbeText);
+  assert.equal(transport.getStatus().lastChatMessage?.messageId, "text-fixture");
+  // The diagnostic callback still receives the custom event; only the summary cache changes.
+  assert.deepEqual(received.map(message => message.text), [null, capturedProbeText, null]);
 });
 
 test("playback diagnostic only exposes whitelisted protocol fields", () => {

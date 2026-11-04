@@ -8,6 +8,7 @@ import { NeteaseRealtimeTransport } from "../src/netease/realtimeTransport.js";
 import { parseLatestInvite } from "../src/netease/inviteParser.js";
 import { invitation, roomFixture, OWNER } from "./roomFixtures.js";
 import { serverFixture } from "./fixtures.js";
+import { capturedProbeText, capturedRoomStatusMessage, capturedUserTextMessage } from "./chatroomMessageFixtures.js";
 
 test("Together configuration requires a session and an explicit allowed inviter; disabling is explicit", () => {
   assert.throws(() => createTogetherWorker(() => {}, undefined, {}), /MUSIC_U/);
@@ -207,6 +208,54 @@ test("HTTP MCP mock end-to-end: join, read song/lyrics, receive, ACK, reply, ord
     assert.equal((await call("netease_together_now")).structuredContent?.inRoom, false);
     assert.equal((await call("netease_together_send_message", { text: "stale", bindingId })).isError, true);
     assert.equal(f.calls.sends.length, 2);
+  } finally { await http.close(); }
+});
+
+test("captured kaomoji survives adjacent custom state events through wait, ACK and routed reply", async () => {
+  const f = roomFixture();
+  await f.join();
+  const transport = new NeteaseRealtimeTransport(false, message => f.internals.handleRealtimeChatMessage(message));
+  const emitter = new EventEmitter();
+  const internals = transport as unknown as { installRuntimeHandlers(value: unknown): void; roomNumber: number };
+  internals.roomNumber = 123;
+  internals.installRuntimeHandlers(emitter);
+  emitter.emit("receiveMsg", 123, capturedUserTextMessage("9000", "own-echo"));
+  emitter.emit("receiveMsg", 123, capturedUserTextMessage("untrusted", "other-sender"));
+  emitter.emit("receiveMsg", 123, capturedRoomStatusMessage(OWNER));
+  assert.equal(f.queue.status().conversation.total, 0);
+  emitter.emit("receiveMsg", 123, capturedUserTextMessage(OWNER));
+  emitter.emit("receiveMsg", 123, capturedUserTextMessage(OWNER));
+  emitter.emit("receiveMsg", 123, capturedRoomStatusMessage(OWNER, "subsequent-status"));
+  assert.equal(f.queue.status().conversation.total, 1);
+  assert.equal(transport.getStatus().lastChatMessage?.text, capturedProbeText);
+
+  const http = await serverFixture({ queue: f.queue, playbackState: f.playbackState, togetherWorker: f.worker });
+  let id = 0;
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const response = await fetch(http.base + "/mcp/music", {
+      method: "POST",
+      headers: { authorization: http.authorization, accept: "application/json, text/event-stream", "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method: "tools/call", params: { name, arguments: args } }),
+    });
+    assert.equal(response.status, 200);
+    const result = (await response.json() as { result: { isError?: boolean; structuredContent: Record<string, unknown> } }).result;
+    assert.notEqual(result.isError, true);
+    return result.structuredContent;
+  };
+  try {
+    const event = await call("cove_bridge_wait", { timeoutSeconds: 1 });
+    assert.equal(event.source, "netease.chatroom");
+    assert.equal(event.visibleText, "【网易云聊天室】\n" + capturedProbeText);
+    assert.equal(event.replyPolicy, "required");
+    assert.equal(event.replyRoute, "netease.chatroom");
+    const eventId = event.eventId as string;
+    assert.deepEqual(f.queue.getEvent(eventId)?.replyTarget, f.worker.getReplyTarget());
+    assert.equal((await call("cove_bridge_wait_ack", { eventId })).acknowledged, true);
+    const replyArgs = { eventId, messages: ["captured fixture reply"] };
+    assert.equal((await call("cove_bridge_reply", replyArgs)).completed, true);
+    assert.equal((await call("cove_bridge_reply", replyArgs)).deduplicated, true);
+    assert.deepEqual(f.calls.sends, [{ text: "captured fixture reply", roomId: "trusted-room" }]);
+    assert.equal(f.queue.getOutstandingRequiredReplyEvent(), null);
   } finally { await http.close(); }
 });
 

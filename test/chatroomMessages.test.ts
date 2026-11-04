@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildRealtimeChatRoomEnterInfo, buildRealtimeChatTextMessage, decodeRealtimeChatRoomMessage } from "../src/netease/realtimeTransport.js";
+import { capturedProbeText, capturedRoomStatusMessage, capturedUserTextMessage } from "./chatroomMessageFixtures.js";
 
 test("decodes ordinary ChatRoom text messages", () => {
   const message = decodeRealtimeChatRoomMessage({
@@ -33,6 +34,23 @@ test("decodes custom ChatRoom payload text without treating it as robot", () => 
 
   assert.equal(message?.category, "custom");
   assert.equal(message?.text, "custom hello");
+});
+
+test("captured custom 120/20009 envelope contains room state rather than chat text", () => {
+  const message = decodeRealtimeChatRoomMessage(capturedRoomStatusMessage(), 1000);
+  assert.equal(message?.category, "custom");
+  assert.equal(message?.msgType, 100);
+  assert.equal(message?.text, null);
+  assert.equal(message?.senderId, "12345");
+  assert.equal(message?.messageId, "status-fixture");
+});
+
+test("captured user message retains plain text and kaomoji from msg_attach_", () => {
+  const message = decodeRealtimeChatRoomMessage(capturedUserTextMessage(), 1000);
+  assert.equal(message?.category, "text");
+  assert.equal(message?.msgType, 0);
+  assert.equal(message?.text, capturedProbeText);
+  assert.equal(message?.messageId, "text-fixture");
 });
 
 test("returns null for an empty ChatRoom message", () => {
